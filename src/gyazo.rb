@@ -5,6 +5,9 @@ require 'open3'
 require 'openssl'
 require 'json'
 require 'yaml'
+require 'aws-sdk'
+require 'securerandom'
+require 'uri'
 
 # setting
 configfile = "#{ENV['HOME']}/.gyazo.config.yml"
@@ -16,11 +19,12 @@ end
 browser_cmd = config['browser_cmd'] || 'xdg-open'
 clipboard_cmd = config['clipboard_cmd'] || 'xclip'
 clipboard_opt = config['clipboard_opt'] || '-sel clip'
-host = config['host'] || 'upload.gyazo.com'
-cgi = config['cgi'] || '/upload.cgi'
-ua = config['ua'] || 'Gyazo/1.2'
-http_port = config['http_port'] || 443
-use_ssl = config['use_ssl'] == nil ? 'true' : config['use_ssl']
+aws_access_key_id = config['aws_access_key_id'] || abort('YOU MUST SET aws_access_key_id')
+aws_secret_access_key = config['aws_secret_access_key'] || abort('YOU MUST SET aws_secret_access_key')
+aws_s3_region = config['aws_s3_region'] || abort('YOU MUST SET aws_s3_region')
+aws_s3_bucket_name = config['aws_s3_bucket_name'] || abort('YOU MUST SET aws_s3_bucket_name')
+aws_s3_path = config['aws_s3_path'] || '/'
+aws_s3_base_url = config['aws_s3_base_url'] || ''
 
 # get id
 idfile = ENV['HOME'] + "/.gyazo.id"
@@ -63,68 +67,28 @@ if application_name =~ /(chrom(ium|e)|firefox|iceweasel)/
   xuri = `xdotool windowfocus #{active_window_id}; xdotool key "ctrl+l"; xdotool key "ctrl+c"; xclip -o`
 end
 
+def gen_url(raw_url)
+  purl = URI.parse(raw_url)
+  purl.path.gsub! %r{/+}, '/'
+  purl.to_s
+end
 
 # upload
-boundary = '----BOUNDARYBOUNDARY----'
-
-metadata = JSON.generate({
-  app: active_window_name,
-  title: active_window_name,
-  url: xuri,
-  note: "#{active_window_name}\n#{xuri}"
-})
-
-data = <<EOF
---#{boundary}\r
-content-disposition: form-data; name="metadata"\r
-\r
-#{metadata}\r
---#{boundary}\r
-content-disposition: form-data; name="id"\r
-\r
-#{id}\r
---#{boundary}\r
-content-disposition: form-data; name="imagedata"; filename="gyazo.com"\r
-\r
-#{imagedata}\r
---#{boundary}--\r
-EOF
-
-header ={
-  'Content-Length' => data.length.to_s,
-  'Content-type' => "multipart/form-data; boundary=#{boundary}",
-  'User-Agent' => ua
-}
-
-env = ENV['http_proxy']
-if env then
-  uri = URI(env)
-  proxy_host, proxy_port = uri.host, uri.port
-else
-  proxy_host, proxy_port = nil, nil
+key = SecureRandom.hex(4) + '.jpg'
+s3 = Aws::S3::Client.new(
+  access_key_id: aws_access_key_id,
+  secret_access_key: aws_secret_access_key,
+  region: aws_s3_region
+)
+s3.put_object(
+  bucket: aws_s3_bucket_name,
+  body: imagedata,
+  key: key
+)
+url = gen_url([aws_s3_base_url, aws_s3_path, key].join('/'))
+puts url
+if system "which #{clipboard_cmd} >/dev/null 2>&1" then
+  system "echo -n '#{url}' | #{clipboard_cmd} #{clipboard_opt}"
 end
-https = Net::HTTP::Proxy(proxy_host, proxy_port).new(host,http_port)
-https.use_ssl = use_ssl
-https.verify_mode = OpenSSL::SSL::VERIFY_PEER
-https.verify_depth = 5
-https.start{
-  res = https.post(cgi,data,header)
-  url = res.response.body
-  puts url
-  if system "which #{clipboard_cmd} >/dev/null 2>&1" then
-    system "echo -n '#{url}' | #{clipboard_cmd} #{clipboard_opt}"
-  end
-  system "#{browser_cmd} '#{url}'"
+system "#{browser_cmd} '#{url}'"
 
-  # save id
-  newid = res.response['X-Gyazo-Id']
-  if newid and newid != "" then
-    if !File.exist?(File.dirname(idfile)) then
-      Dir.mkdir(File.dirname(idfile))
-    end
-    if File.exist?(idfile) then
-      File.rename(idfile, idfile+Time.new.strftime("_%Y%m%d%H%M%S.bak"))
-    end
-    File.open(idfile,"w").print(newid)
-  end
-}
